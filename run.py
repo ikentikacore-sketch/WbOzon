@@ -6,6 +6,7 @@
     python run.py --head       — показать первые 10 строк каждого файла в data/
     python run.py --check      — сверка WB и Озон за последний закрытый период 16–15
     python run.py --pack       — собрать компактные файлы для чата в data/for_chat.zip
+    python run.py --prices     — срез текущих цен и комиссий по БЖ2, БЖ4, БЖ5, БЖ11 (или --prices "БЖ2,ШКЮ-1")
 """
 import argparse
 import sys
@@ -14,7 +15,7 @@ import traceback
 
 import pandas as pd
 
-from wbozon import check, finance, ozon, pack, summary, wb
+from wbozon import check, finance, ozon, pack, price_snapshot, summary, wb
 from wbozon.common import DATA, log, mask, read_csv, setup_logging, write_csv
 
 errors = []
@@ -80,10 +81,17 @@ def main():
     ap.add_argument("--head", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--pack", action="store_true")
+    ap.add_argument("--prices", nargs="?", const=",".join(price_snapshot.DEFAULT))
     a = ap.parse_args()
     setup_logging()
     if a.head:
         show_head()
+        return 0
+    if a.prices:
+        out, m, _ = price_snapshot.build(a.prices.split(","))
+        with pd.option_context("display.width", 200, "display.max_rows", 500):
+            print(m.to_string(index=False))
+        print(out)
         return 0
     if a.pack:
         print(pack.build())
