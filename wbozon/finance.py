@@ -4,7 +4,7 @@ import datetime as dt
 
 import pandas as pd
 
-from .common import START_DATE, env, log, period_bounds, period_of, write_csv, yesterday
+from .common import START_DATE, env, log, period_bounds, period_of, read_csv, write_csv, yesterday
 from .normalize import ozon_model, wb_model
 
 MONEY = ["retail_price", "retail_price_with_disc", "retail_amount", "sales_commission", "pvz_reward",
@@ -72,8 +72,9 @@ def write_wb(data_dir, real):
     return tot
 
 
-def write_ozon(data_dir, ozon_module, sales):
-    frames = []
+def write_ozon(data_dir, ozon_module):
+    """Пишет ozon_finance_<период>.csv. Итоги по периодам — ozon_totals() (после уточнения дат продаж)."""
+    n = 0
     for p in periods():
         a, b = period_bounds(p)
         b = min(b, yesterday())
@@ -87,12 +88,18 @@ def write_ozon(data_dir, ozon_module, sales):
         df["period"] = p
         df["model"] = df["offer_id"].map(lambda x: ozon_model(x) if x else "")
         write_csv(df, data_dir / f"ozon_finance_{p}.csv")
-        frames.append(df)
+        n += 1
+    return n
+
+
+def ozon_totals(data_dir):
+    frames = [read_csv(f) for f in sorted(data_dir.glob("ozon_finance_*.csv"))]
+    frames = [f for f in frames if f is not None and len(f)]
     if not frames:
         return pd.DataFrame()
-    all_ = pd.concat(frames)
-    tot = all_[all_["line"] == "total"].copy()
-    tot["type_name"] = tot["type_name"].where(tot["type_name"] != "", "type_" + tot["type_id"].astype(str))
+    tot = pd.concat(frames)
+    tot["amount"] = pd.to_numeric(tot["amount"], errors="coerce").fillna(0)
+    sales = read_csv(data_dir / "ozon_sales.csv")
     piv = tot.pivot_table(index="period", columns="type_name", values="amount", aggfunc="sum").round(2)
     piv["to_transfer"] = piv.sum(axis=1)
     piv = piv.reset_index()

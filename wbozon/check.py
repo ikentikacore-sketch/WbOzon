@@ -67,9 +67,38 @@ def run():
         rows.append({"check": f"период {p} ({a}–{b})", "metric": name, "lk_report": real_v, "ours": stat_v,
                      "diff": round(stat_v - real_v, 2),
                      "diff_pct": round((stat_v - real_v) / real_v * 100, 3) if real_v else ""})
+    rows += ozon_rows(p, a, b)
     df = pd.DataFrame(rows)
     write_csv(df, DATA / f"check_{p}.csv")
     for r in rows:
         log.info("Сверка | %s | %s | эталон %s | наше %s | %s%%", r["check"], r["metric"], r["lk_report"],
                  r["ours"], r["diff_pct"])
     return df
+
+
+def ozon_rows(p, a, b):
+    """Озон: доставленные отправления и возвраты против начислений «Выручка» за тот же период."""
+    fin = read_csv(DATA / f"ozon_finance_{p}.csv")
+    sales = read_csv(DATA / "ozon_sales.csv")
+    if fin is None or sales is None:
+        return []
+    fin["amount"] = pd.to_numeric(fin["amount"])
+    fin["qty"] = pd.to_numeric(fin["qty"], errors="coerce").fillna(0)
+    sale = fin[fin["type_id"] == "sale"]
+    pos, neg = sale[sale["amount"] > 0], sale[sale["amount"] < 0]
+    s = sales[(sales["date"] >= a.isoformat()) & (sales["date"] <= b.isoformat())].copy()
+    for c in ("qty", "revenue"):
+        s[c] = pd.to_numeric(s[c])
+    d, r = s[s["status"] == "delivered"], s[s["status"] == "return"]
+    out = []
+    for name, ref, ours in (
+        ("Озон: продано, шт (начисления vs отправления)", pos["qty"].sum(), d["qty"].sum()),
+        ("Озон: выручка по цене продавца, руб", pos["amount"].sum(), d["revenue"].sum()),
+        ("Озон: возвраты, шт", neg["qty"].sum(), r["qty"].sum()),
+        ("Озон: возвраты, руб", -neg["amount"].sum(), r["revenue"].sum()),
+        ("Озон: к перечислению за период (сумма всех начислений), руб", fin["amount"].sum(), fin["amount"].sum()),
+    ):
+        ref, ours = round(float(ref), 2), round(float(ours), 2)
+        out.append({"check": f"Озон период {p} ({a}–{b})", "metric": name, "lk_report": ref, "ours": ours,
+                    "diff": round(ours - ref, 2), "diff_pct": round((ours - ref) / ref * 100, 3) if ref else ""})
+    return out

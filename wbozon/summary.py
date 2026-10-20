@@ -59,9 +59,11 @@ def sales_sheet(data_dir):
 
 
 def stock_sheet(data_dir):
-    day = dt.date.today().isoformat()
+    def latest(prefix):
+        files = sorted(data_dir.glob(f"{prefix}_stock_*.csv"))
+        return read_csv(files[-1]) if files else None
     parts = []
-    wb = read_csv(data_dir / f"wb_stock_{day}.csv")
+    wb = latest("wb")
     if wb is not None and len(wb):
         wb = _num(wb, ["stock", "in_way_to_client", "in_way_from_client"])
         g = wb.groupby(KEYS + ["warehouse_type"])[["stock", "in_way_to_client", "in_way_from_client"]].sum()
@@ -69,8 +71,8 @@ def stock_sheet(data_dir):
         g.columns = [f"{a}_{b}" for a, b in g.columns]
         g = g.loc[:, (g != 0).any()]
         g.insert(0, "articles", _articles(wb))
-        parts.append(g.reset_index())
-    oz = read_csv(data_dir / f"ozon_stock_{day}.csv")
+        parts.append(g.reset_index().assign(date=wb["date"].iloc[0]))
+    oz = latest("ozon")
     if oz is not None and len(oz):
         oz = _num(oz, ["free_to_sell", "reserved", "in_transit", "present"])
         tot = oz[oz["scheme"].str.endswith("_TOTAL")]
@@ -79,13 +81,13 @@ def stock_sheet(data_dir):
         tr = oz[oz["scheme"] == "FBO"].groupby(KEYS)["in_transit"].sum().rename("in_transit_FBO")
         g = g.join(tr).fillna(0)
         g.insert(0, "articles", _articles(tot))
-        parts.append(g.reset_index())
+        parts.append(g.reset_index().assign(date=oz["date"].iloc[0]))
     if not parts:
         return pd.DataFrame(columns=KEYS)
     out = pd.concat(parts, ignore_index=True)
-    num = [c for c in out.columns if c not in KEYS + ["articles"]]
+    num = [c for c in out.columns if c not in KEYS + ["articles", "date"]]
     out[num] = out[num].fillna(0)
-    out.insert(0, "date", day)
+    out.insert(0, "date", out.pop("date"))
     return out.sort_values(["model", "size", "platform"])
 
 

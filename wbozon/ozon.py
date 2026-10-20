@@ -164,7 +164,7 @@ def _postings(path, since, to):
     while True:
         body = {"filter": {"since": since.strftime("%Y-%m-%dT00:00:00Z"),
                            "to": to.strftime("%Y-%m-%dT23:59:59Z")},
-                "limit": 1000, "cursor": cursor,
+                "limit": 100, "cursor": cursor,  # максимум 100 на страницу
                 "with": {"analytics_data": True, "financial_data": True}}
         r = _result(post(path, body))
         part = r.get("postings") if isinstance(r, dict) else r
@@ -195,9 +195,9 @@ def _posting_rows(postings, scheme):
         for pr in p.get("products") or []:
             offer = pr.get("offer_id", "")
             qty = int(pr.get("quantity") or 1)
-            price = _num(pr.get("price"))
+            price = _amount(pr.get("price"))
             f = fin.get(pr.get("sku")) or {}
-            client = _num(f.get("customer_price") or f.get("client_price")) or price
+            client = _num(f.get("customer_price") or f.get("client_price")) or price  # Озон цену покупателя в отправлении не отдаёт
             base, size = split_ozon_offer(offer)
             rows.append({
                 "platform": "Ozon", "cabinet": CABINET,
@@ -260,7 +260,7 @@ def load_orders_and_sales(data_dir):
         ret = pd.DataFrame()
     old_s = read_csv(s_path)
     if len(ret):
-        ret = ret.reindex(columns=cols + ["return_id"])
+        ret = ret.reindex(columns=cols + ["return_id", "return_reason"])
         if old_s is not None and "return_id" in old_s:
             ret = pd.concat([old_s[old_s["status"] == "return"], ret.astype(str)]).drop_duplicates("return_id", keep="last")
     elif old_s is not None and len(old_s):
@@ -268,6 +268,7 @@ def load_orders_and_sales(data_dir):
     sales = pd.concat([sales.astype(str), ret.astype(str) if len(ret) else ret], ignore_index=True)
     if len(sales):
         sales["model"] = sales["article"].map(ozon_model)
+        sales["size"] = sales["article"].map(lambda a: split_ozon_offer(a)[1])
         sales = sales[sales["date"] <= to.isoformat()].sort_values(["date", "article"], kind="stable")
     write_csv(sales, s_path)
     return orders, sales
@@ -282,6 +283,7 @@ def _merge(path, new, cutoff, keys):
     else:
         df = new
     df["model"] = df["article"].map(ozon_model)  # пересчёт по всей истории — учитывает новый mapping.csv
+    df["size"] = df["article"].map(lambda a: split_ozon_offer(a)[1])
     df = df.drop_duplicates(subset=keys, keep="last").sort_values(["date", "article"], kind="stable")
     write_csv(df, path)
     return df
@@ -296,9 +298,13 @@ def _returns(since, to):
         r = post("/v1/returns/list", body)
         items = r.get("returns") or []
         for it in items:
+            # Cancellation — возврат на склад после отмены/невыкупа: он уже есть в заказах как cancelled
+            if it.get("type") == "Cancellation":
+                continue
             pr = it.get("product") or {}
             offer = pr.get("offer_id", "")
-            price = _num((pr.get("price") or {}).get("price") if isinstance(pr.get("price"), dict) else pr.get("price"))
+            pp = pr.get("price")
+            price = _num(pp.get("price", pp.get("amount"))) if isinstance(pp, dict) else _num(pp)
             qty = int(pr.get("quantity") or 1)
             lg = it.get("logistic") or {}
             base, size = split_ozon_offer(offer)
@@ -310,7 +316,7 @@ def _returns(since, to):
                 "revenue": round(price * qty, 2), "status": "return", "sku": pr.get("sku", ""),
                 "scheme": it.get("schema", ""), "posting_number": it.get("posting_number", ""),
                 "ozon_status": ((it.get("visual") or {}).get("status") or {}).get("sys_name", ""),
-                "return_id": it.get("id", ""),
+                "return_id": it.get("id", ""), "return_reason": it.get("return_reason_name", ""),
             })
         if not items or not r.get("has_next"):
             break
@@ -368,16 +374,16 @@ def load_stocks(data_dir, products):
     # 3) свои склады FBS по складам
     for i in range(0, len(skus), 500):
         try:
-            r = post("/v2/product/info/stocks-by-warehouse/fbs", {"sku": [str(s) for s in skus[i:i + 500]]})
+            r = post("/v2/product/info/stocks-by-warehouse/fbs", {"sku": [str(s) for s in skus[i:i + 500]], "limit": 1000})
         except ApiError as e:
             log.error("Озон остатки FBS по складам: %s", e)
             break
-        for it in r.get("result") or r.get("items") or []:
+        for it in r.get("products") or r.get("result") or []:
             offer = it.get("offer_id", "")
             rows.append({"date": day, "platform": "Ozon", "cabinet": CABINET, "model": ozon_model(offer),
                          "article": offer, "size": split_ozon_offer(offer)[1], "sku": it.get("sku", ""),
                          "scheme": "FBS", "warehouse": it.get("warehouse_name", ""),
-                         "free_to_sell": max(0, int(it.get("present") or 0) - int(it.get("reserved") or 0)),
+                         "free_to_sell": it.get("free_stock", max(0, int(it.get("present") or 0) - int(it.get("reserved") or 0))),
                          "present": it.get("present", 0), "reserved": it.get("reserved", 0)})
     df = pd.DataFrame(rows)
     first = ["date", "platform", "cabinet", "model", "article", "size", "sku", "scheme", "warehouse",
@@ -395,21 +401,7 @@ def load_accrual_types():
     if cached:
         return cached
     r = post("/v1/finance/accrual/types", {})
-    types = {}
-
-    def walk(o):
-        if isinstance(o, dict):
-            if "type_id" in o or "id" in o:
-                tid = o.get("type_id", o.get("id"))
-                name = o.get("name") or o.get("type_name") or o.get("title")
-                if name:
-                    types[str(tid)] = name
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-    walk(r)
+    types = {str(t["id"]): t.get("description") or t.get("name", "") for t in r.get("accrual_types") or []}
     save_json(types, path)
     return types
 
@@ -421,8 +413,7 @@ def _accruals_day(day):
         return load_json(path)
     out, last_id = [], ""
     while True:
-        r = post("/v1/finance/accrual/by-day", {"date": day.isoformat(), "last_id": last_id})
-        r = _result(r)
+        r = _result(post("/v1/finance/accrual/by-day", {"date": day.isoformat(), "last_id": last_id}, pause=0.2))
         out.extend(r.get("accruals") or [])
         last_id = r.get("last_id") or ""
         if not last_id or not r.get("accruals"):
@@ -437,43 +428,102 @@ def _amount(o):
     return _num(o)
 
 
-def _leaf_fees(o, ctx, out):
-    """Рекурсивно собирает услуги/комиссии: объекты с type_id и суммой."""
-    if isinstance(o, dict):
-        ctx = dict(ctx)
-        for k in ("sku", "offer_id", "posting_number"):
-            if o.get(k):
-                ctx[k] = o[k]
-        amt_key = next((k for k in ("accrued", "amount", "price") if k in o), None)
-        if "type_id" in o and amt_key and not isinstance(o.get("fees"), list):
-            out.append({**ctx, "type_id": o["type_id"], "amount": _amount(o[amt_key])})
-        for k, v in o.items():
-            if isinstance(v, (dict, list)):
-                _leaf_fees(v, ctx, out)
-    elif isinstance(o, list):
-        for v in o:
-            _leaf_fees(v, ctx, out)
+def _components(a):
+    """Раскладывает начисление на строки: выручка, комиссия, услуги с type_id.
+    Сумма строк равна total_amount; если Озон добавит новое поле, разница уйдёт в строку «Прочее»."""
+    out = []
+
+    def fee(sku, qty, f):
+        out.append({"sku": sku, "qty": qty, "type_id": f.get("type_id", ""), "amount": _amount(f.get("accrued"))})
+
+    for pr in ((a.get("posting") or {}).get("products") or []):
+        sku, qty = pr.get("sku", ""), pr.get("quantity", "")
+        c = pr.get("commission") or {}
+        if c:
+            out.append({"sku": sku, "qty": qty, "type_id": "sale", "amount": _amount(c.get("sale_amount")),
+                        "seller_price": _amount(c.get("seller_price")), "sale_price": _amount(c.get("sale_price"))})
+            out.append({"sku": sku, "qty": qty, "type_id": "commission", "amount": _amount(c.get("commission"))})
+        for f in ((pr.get("delivery") or {}).get("services") or []):
+            fee(sku, qty, f)
+        for f in (pr.get("services") or []):
+            fee(sku, qty, f)
+    for it in ((a.get("item_fees") or {}).get("fees") or []):
+        for f in it.get("fees") or []:
+            fee(it.get("sku", ""), it.get("quantity", ""), f)
+    nf = a.get("non_item_fee")
+    for f in (nf if isinstance(nf, list) else [nf] if nf else []):
+        fee("", "", f)
+    cf = a.get("container_fees")
+    for f in (cf if isinstance(cf, list) else (cf or {}).get("fees") or ([cf] if cf else [])):
+        if isinstance(f, dict) and "accrued" in f:
+            fee("", "", f)
+    diff = round(_amount(a.get("total_amount")) - sum(x["amount"] for x in out), 2)
+    if abs(diff) >= 0.01:
+        out.append({"sku": "", "qty": "", "type_id": "other", "amount": diff})
+    return out
+
+
+NAMES = {"sale": "Выручка (продажа по цене продавца)", "commission": "Комиссия за продажу", "other": "Прочее"}
 
 
 def finance_rows(date_from, date_to):
     types = load_accrual_types()
+    products = load_json(RAW / "ozon_products.json", {}) or {}
+    offer_by_sku = {str(sku_of(p)): o for o, p in products.items()}
     rows = []
     for d in _chunks(date_from, date_to, days=1):
         day = d[0]
         for a in _accruals_day(day):
             base = {"date": _msk_date(a.get("date")) or day.isoformat(), "accrual_id": a.get("accrual_id", ""),
-                    "category": a.get("accrued_category", ""), "posting_number": a.get("unit_number", "")}
-            rows.append({**base, "line": "total", "type_id": a.get("type_id", ""),
-                         "type_name": types.get(str(a.get("type_id", "")), ""),
-                         "sku": "", "offer_id": "", "amount": _amount(a.get("total_amount"))})
-            fees = []
-            _leaf_fees({k: v for k, v in a.items() if k not in ("total_amount",)}, {}, fees)
-            for f in fees:
-                rows.append({**base, "line": "fee", "type_id": f["type_id"],
-                             "type_name": types.get(str(f["type_id"]), ""), "sku": f.get("sku", ""),
-                             "offer_id": f.get("offer_id", ""), "amount": f["amount"]})
+                    "category": a.get("accrued_category", ""), "posting_number": a.get("unit_number", ""),
+                    "scheme": (a.get("posting") or {}).get("delivery_schema", "")}
+            for c in _components(a):
+                tid = str(c["type_id"])
+                rows.append({**base, "type_id": tid, "type_name": NAMES.get(tid) or types.get(tid, f"тип {tid}"),
+                             "sku": c["sku"], "offer_id": offer_by_sku.get(str(c["sku"]), ""), "qty": c["qty"],
+                             "amount": round(c["amount"], 2), "seller_price": c.get("seller_price", ""),
+                             "sale_price": c.get("sale_price", "")})
     df = pd.DataFrame(rows)
     if len(df):
         df.insert(0, "cabinet", CABINET)
         df.insert(0, "platform", "Ozon")
     return df
+
+
+def enrich_prices(data_dir):
+    """Из начислений (строки «Выручка», commission.sale_price) берём:
+    - цену для покупателя после скидок за счёт Озона (аналог СПП) -> price_after_spp;
+    - дату продажи (Озон начисляет выручку в момент доставки) -> date доставленных в ozon_sales.
+    Ключ — отправление + SKU; строки возврата (отрицательная выручка) пропускаем."""
+    price, sold = {}, {}
+    for f in sorted(data_dir.glob("ozon_finance_*.csv")):
+        df = read_csv(f)
+        if df is None or not len(df):
+            continue
+        s = df[(df["type_id"] == "sale") & (pd.to_numeric(df["amount"], errors="coerce") > 0)]
+        for _, r in s.iterrows():
+            k = (r["posting_number"], str(r["sku"]))
+            if r["sale_price"] != "":
+                price[k] = round(abs(_num(r["sale_price"])) / (_num(r["qty"]) or 1), 2)
+            sold.setdefault(k, r["date"])
+    if not price and not sold:
+        return 0
+    n = 0
+    for name in ("ozon_orders.csv", "ozon_sales.csv"):
+        df = read_csv(data_dir / name)
+        if df is None or not len(df):
+            continue
+        keys = list(zip(df["posting_number"], df["sku"].astype(str)))
+        df["price_after_spp"] = df["price_pre_spp"]  # по умолчанию — цена продавца
+        pr = pd.Series([price.get(k) for k in keys], index=df.index)
+        df.loc[pr.notna(), "price_after_spp"] = pr[pr.notna()].astype(str)
+        n += int(pr.notna().sum())
+        if name == "ozon_sales.csv":
+            d = pd.Series([sold.get(k) for k in keys], index=df.index)
+            m = d.notna() & (df["status"] == "delivered")
+            df.loc[m, "delivery_date"] = d[m]
+            df.loc[m, "date"] = d[m]
+            df = df[df["date"] <= yesterday().isoformat()].sort_values(["date", "article"], kind="stable")
+        write_csv(df, data_dir / name)
+    log.info("Озон: цена после скидок подставлена в %d строк, дата продажи — по начислениям", n)
+    return n

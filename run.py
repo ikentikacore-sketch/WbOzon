@@ -4,7 +4,8 @@
     python run.py --only wb    — только Wildberries
     python run.py --only ozon  — только Озон
     python run.py --head       — показать первые 10 строк каждого файла в data/
-    python run.py --check      — сверка WB за последний закрытый период 16–15
+    python run.py --check      — сверка WB и Озон за последний закрытый период 16–15
+    python run.py --pack       — собрать компактные файлы для чата в data/for_chat.zip
 """
 import argparse
 import sys
@@ -13,7 +14,7 @@ import traceback
 
 import pandas as pd
 
-from wbozon import check, finance, ozon, summary, wb
+from wbozon import check, finance, ozon, pack, summary, wb
 from wbozon.common import DATA, log, mask, read_csv, setup_logging, write_csv
 
 errors = []
@@ -52,7 +53,9 @@ def run_ozon():
     sales = res[1] if res else read_csv(DATA / "ozon_sales.csv")
     if products:
         step("Озон остатки", ozon.load_stocks, DATA, products)
-    fin = step("Озон финансы", finance.write_ozon, DATA, ozon, sales)
+    step("Озон финансы", finance.write_ozon, DATA, ozon)
+    step("Озон цена после скидок", ozon.enrich_prices, DATA)
+    fin = step("Озон итоги финансов", finance.ozon_totals, DATA)
     return ozon.catalog_rows(products, prices, cats), fin
 
 
@@ -76,10 +79,14 @@ def main():
     ap.add_argument("--only", choices=["wb", "ozon"])
     ap.add_argument("--head", action="store_true")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--pack", action="store_true")
     a = ap.parse_args()
     setup_logging()
     if a.head:
         show_head()
+        return 0
+    if a.pack:
+        print(pack.build())
         return 0
     if a.check:
         with pd.option_context("display.width", 250, "display.max_colwidth", 70):
@@ -113,6 +120,7 @@ def main():
     else:
         fin_all = read_csv(DATA / "raw" / "finance_totals.csv")
     step("summary.xlsx", summary.build, DATA, fin_all)
+    step("Файлы для чата", pack.build)
 
     if errors:
         log.warning("Выгрузка завершена с ошибками (%d):\n  %s", len(errors), "\n  ".join(errors))
