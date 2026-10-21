@@ -527,3 +527,26 @@ def enrich_prices(data_dir):
         write_csv(df, data_dir / name)
     log.info("Озон: цена после скидок подставлена в %d строк, дата продажи — по начислениям", n)
     return n
+
+
+def delivery_dates(postings):
+    """Дата доставки покупателю (fact_delivery_date) по номерам отправлений: /v2/posting/fbo/get,
+    для FBS — /v3/posting/fbs/get. В списках отправлений FBO этой даты нет.
+    postings: [(posting_number, scheme)]. Кэш: data/raw/ozon_delivery_dates.json (дата по Москве)."""
+    path = RAW / "ozon_delivery_dates.json"
+    cache = load_json(path, {}) or {}
+    todo = [(p, s) for p, s in postings if p not in cache]
+    for i, (p, scheme) in enumerate(todo, 1):
+        try:
+            if scheme == "FBS":
+                r = _result(post("/v3/posting/fbs/get", {"posting_number": p}, pause=0.05))
+            else:
+                r = _result(post("/v2/posting/fbo/get", {"posting_number": p, "with": {}}, pause=0.05))
+            cache[p] = _msk_date(r.get("fact_delivery_date") or "")
+        except ApiError as e:
+            log.error("Озон дата доставки %s: %s", p, e)
+        if i % 200 == 0:
+            save_json(cache, path)
+            log.info("Озон даты доставки: %d из %d", i, len(todo))
+    save_json(cache, path)
+    return cache

@@ -6,6 +6,8 @@
     python run.py --head       — показать первые 10 строк каждого файла в data/
     python run.py --check      — сверка WB и Озон за последний закрытый период 16–15
     python run.py --pack       — собрать компактные файлы для чата в data/for_chat.zip
+    python run.py --ozon-plan  — заказы, выкупы, остатки Озона по БЖ2/4/5/11 с 01.02.2026 (или --ozon-plan "БЖ2,ШКЮ-1")
+    python run.py --wb-plan    — БЖ5 на WB сейчас + прошлогодняя динамика БЖ2/БЖ4/БЖ11 (20.10–31.12.2025)
     python run.py --prices     — срез текущих цен и комиссий по БЖ2, БЖ4, БЖ5, БЖ11 (или --prices "БЖ2,ШКЮ-1")
 """
 import argparse
@@ -15,7 +17,7 @@ import traceback
 
 import pandas as pd
 
-from wbozon import check, finance, ozon, pack, price_snapshot, summary, wb
+from wbozon import check, finance, ozon, ozon_plan, pack, price_snapshot, summary, wb, wb_plan
 from wbozon.common import DATA, log, mask, read_csv, setup_logging, write_csv
 
 errors = []
@@ -81,11 +83,24 @@ def main():
     ap.add_argument("--head", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--pack", action="store_true")
+    ap.add_argument("--wb-plan", action="store_true")
+    ap.add_argument("--ozon-plan", nargs="?", const=",".join(ozon_plan.DEFAULT))
     ap.add_argument("--prices", nargs="?", const=",".join(price_snapshot.DEFAULT))
     a = ap.parse_args()
     setup_logging()
     if a.head:
         show_head()
+        return 0
+    if a.wb_plan:
+        out, _, chk, info = wb_plan.build()
+        print(chk.to_string(index=False))
+        print(info)
+        print(out)
+        return 0
+    if a.ozon_plan:
+        out, _, chk = ozon_plan.build(a.ozon_plan.split(","))
+        print(chk.to_string(index=False))
+        print(out)
         return 0
     if a.prices:
         out, m, _ = price_snapshot.build(a.prices.split(","))
